@@ -1,0 +1,648 @@
+{
+  "name": "task",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 11
+            }
+          ]
+        }
+      },
+      "id": "3ce2adaa-d91a-401f-bd26-187ce7a1963b",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -112,
+        416
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1H8X-_QDe7E4lTY5qKjPKeXPOPpIO6sxc_9WHwc-AZaA",
+          "mode": "list",
+          "cachedResultName": "hca",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1H8X-_QDe7E4lTY5qKjPKeXPOPpIO6sxc_9WHwc-AZaA/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1H8X-_QDe7E4lTY5qKjPKeXPOPpIO6sxc_9WHwc-AZaA/edit#gid=0"
+        },
+        "options": {}
+      },
+      "id": "08d66295-dbdc-49a1-90eb-4e148cbd7341",
+      "name": "Read All Tasks",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        144,
+        416
+      ],
+      "alwaysOutputData": true,
+      "retryOnFail": false,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "RtpoEcPDjuEhdnpV",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ============================\n// FILTER DEADLINES – DAILY RUN\n// (Schedule runs once per day)\n// ============================\n\nconst r = $json;\n\n// ---- Current time (UTC internally) ----\nconst now = new Date();\n\n// ---- Compare two dates based on IST date only ----\nfunction sameISTDate(a, b) {\n  return a.toLocaleDateString(\"en-IN\", { timeZone: \"Asia/Kolkata\" }) ===\n         b.toLocaleDateString(\"en-IN\", { timeZone: \"Asia/Kolkata\" });\n}\n\n// ---- Parse Google Sheets numeric serial dates ----\nfunction parseSheetSerial(x) {\n  const n = Number(x);\n  if (!Number.isFinite(n)) return null;\n  const ms = Math.round((n - 25569) * 86400 * 1000);\n  const d = new Date(ms);\n  return isNaN(d) ? null : d;\n}\n\n// ---- Normalize due_at for matching ----\nfunction normalizeDueString(s) {\n  if (!s) return \"\";\n  let t = String(s).trim().replace(/\\s+/g, \" \");\n\n  if (/ist$/i.test(t)) {\n    t = t.replace(/\\s*ist$/i, \" IST\");\n  } else if (/^\\d{4}-\\d{2}-\\d{2}\\s+\\d{2}:\\d{2}$/.test(t)) {\n    t = t + \" IST\";\n  }\n\n  return t;\n}\n\n// ---- Convert due_at text to real Date object ----\nfunction parseDue(dueAtRaw) {\n  if (!dueAtRaw) return null;\n\n  // A) Sheets serial number\n  const serial = parseSheetSerial(dueAtRaw);\n  if (serial) return serial;\n\n  // B) Try native Date parse\n  let d = new Date(dueAtRaw);\n  if (!isNaN(d)) return d;\n\n  const s0 = String(dueAtRaw).trim();\n\n  // C) \"YYYY-MM-DD HH:mm IST\"\n  let m = s0.match(\n    /^(\\d{4})-(\\d{2})-(\\d{2})\\s+(\\d{2}):(\\d{2})\\s*IST$/i\n  );\n  if (m) {\n    const iso = `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:00+05:30`;\n    d = new Date(iso);\n    if (!isNaN(d)) return d;\n  }\n\n  // D) \"YYYY-MM-DD HH:mm\" (assume IST)\n  m = s0.match(\n    /^(\\d{4})-(\\d{2})-(\\d{2})\\s+(\\d{2}):(\\d{2})$/\n  );\n  if (m) {\n    const iso = `${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:00+05:30`;\n    d = new Date(iso);\n    if (!isNaN(d)) return d;\n  }\n\n  // E) Fallback → add IST zone if missing\n  const hasZone = /Z|[+\\-]\\d{2}:?\\d{2}$/i.test(s0);\n  const iso2 = hasZone ? s0 : s0.replace(\" \", \"T\") + \"+05:30\";\n  d = new Date(iso2);\n  return isNaN(d) ? null : d;\n}\n\n// ---- Skip if completed or muted ----\nif ((r.status || \"\").toLowerCase() === \"completed\") return;\nif ((r.muted  || \"\").toLowerCase() === \"1\") return;\n\n// ---- chat_id validation ----\nconst chatIdStored = r.chat_id ?? r.chatId ?? \"\";\nif (!chatIdStored) return;\n\nconst chatIdNum = Number(chatIdStored);\n\n// ---- Parse due date ----\nconst dueRaw  = r.due_at || r.dueAt || r.due || \"\";\nconst dueNorm = normalizeDueString(dueRaw);\nconst dueDate = parseDue(dueNorm);\nif (!dueDate) return;\n\n// ---- Keep only tasks due TODAY (IST) ----\nif (!sameISTDate(dueDate, now)) return;\n\n// ---- Avoid duplicate reminders on same IST day ----\nconst lastSent = r.last_sent_on ? parseDue(r.last_sent_on) : null;\nif (lastSent && sameISTDate(lastSent, now)) return;\n\n// ---- Build reminder ----\n\n// Check if due_at has an explicit time (HH:mm)\nconst hasTime = /\\d{2}:\\d{2}/.test(dueNorm);\n\nlet human;\nif (hasTime) {\n  // Date + time (e.g. \"Sat 22 Nov, 16:00\")\n  human = dueDate.toLocaleString(\"en-GB\", {\n    timeZone: \"Asia/Kolkata\",\n    weekday: \"short\",\n    day: \"2-digit\",\n    month: \"short\",\n    hour: \"2-digit\",\n    minute: \"2-digit\",\n    hour12: false,\n  });\n} else {\n  // Date only (e.g. \"Sat 22 Nov\")\n  human = dueDate.toLocaleString(\"en-GB\", {\n    timeZone: \"Asia/Kolkata\",\n    weekday: \"short\",\n    day: \"2-digit\",\n    month: \"short\",\n  });\n}\n\n// Assignee (optional)\nconst who = r.assignee ? ` for ${r.assignee}` : \"\";\n\n// Final message\nconst msg = hasTime\n  ? `⏰ Reminder${who}: ${r.task || \"(no task text)\"} — ${human} IST`\n  : `⏰ Reminder${who}: ${r.task || \"(no task text)\"} — ${human}`;\n\n// Use existing row_key from sheet if available\nconst row_key = r.row_key || `${chatIdStored}|${dueNorm}`;\n\nreturn {\n  json: {\n    chat_id: chatIdNum,\n    text: msg,\n    task: r.task || \"\",\n    assignee: r.assignee || \"\",\n    due_at: dueNorm,\n    row_key,\n    last_sent_on: now\n      .toLocaleString(\"en-GB\", {\n        timeZone: \"Asia/Kolkata\",\n        year: \"numeric\",\n        month: \"2-digit\",\n        day: \"2-digit\",\n        hour: \"2-digit\",\n        minute: \"2-digit\",\n        hour12: false,\n      })\n      .replace(\n        /(\\d{2})\\/(\\d{2})\\/(\\d{4}),\\s(\\d{2}):(\\d{2})/,\n        \"$3-$2-$1 $4:$5\"\n      ) + \" IST\",\n  },\n};\n"
+      },
+      "id": "1cb84622-517e-455d-9010-b12c3d876bd7",
+      "name": "Filter Deadlines",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        416,
+        416
+      ],
+      "alwaysOutputData": true,
+      "retryOnFail": false,
+      "notesInFlow": false,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "id-1",
+              "leftValue": "={{ $json.text }}",
+              "operator": {
+                "type": "string",
+                "operation": "exists",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "id-2",
+              "leftValue": "={{ $json.row_key }}",
+              "operator": {
+                "type": "string",
+                "operation": "exists"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "99064589-9477-4dc7-8adb-02430871edad",
+      "name": "IF Has Reminders",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.1,
+      "position": [
+        656,
+        416
+      ],
+      "alwaysOutputData": false,
+      "retryOnFail": false,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "chatId": "={{ +$json.chat_id || +$item(0).$node[\"Read All Tasks\"].json.chat_id }}\n\n\n",
+        "text": "={{ $json.text }}\n\n",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "1f18947b-b585-4fa0-9911-b6055b3e1e37",
+      "name": "Send Reminder",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        1008,
+        400
+      ],
+      "webhookId": "bde1f0e3-99aa-4dd8-86d9-c0b037120409",
+      "retryOnFail": true,
+      "alwaysOutputData": false,
+      "credentials": {
+        "telegramApi": {
+          "id": "35Qu4nc5qWXQmjUM",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "updates": [
+          "message"
+        ],
+        "additionalFields": {}
+      },
+      "id": "c327b72f-17c4-4ae3-9d80-f29267150741",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1,
+      "position": [
+        -208,
+        0
+      ],
+      "webhookId": "13ce9cfc-6278-424b-b04a-c543dedc5d04",
+      "credentials": {
+        "telegramApi": {
+          "id": "35Qu4nc5qWXQmjUM",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "chatId": "={{ +(\n    $json.chat_id\n || $node[\"Sanitize Input\"].json.chat_id\n || $node[\"Telegram Trigger\"].json.message.chat.id\n) }}\n",
+        "text": "={{\n  (\n    $json.output\n || $node[\"AI Agent\"].json.output\n || $json.text\n || $node[\"Sanitize Input\"].json.reply\n || 'OK.'\n  ).toString().slice(0,4000)\n}}\n\n",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "63fd7652-04de-41ac-a162-998aa9b49ec3",
+      "name": "Telegram Send",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [
+        1024,
+        0
+      ],
+      "webhookId": "95ae30df-2684-4303-b0af-930b65d1e2d5",
+      "credentials": {
+        "telegramApi": {
+          "id": "35Qu4nc5qWXQmjUM",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ \n  JSON.stringify({\n    intent: $json.intent,\n    task: $json.task,\n    assignee: $json.assignee,\n    due_at: $json.due_at,\n    chat_id: $json.chat_id,        // keep as string\n    row_key: $json.row_key,\n    status: $json.status,\n    chatInput: $json.chatInput,\n    currentDate: $json.currentDate,\n    reply: $json.reply\n  }) \n}}\n",
+        "options": {
+          "systemMessage": "=You are a concise Telegram task agent for a single chat (multi-user via chat_id).\nTimezone: Asia/Kolkata (IST). Output: human text only (no JSON, IDs, tool logs, or stack traces).\n\nCurrent date and time context:\n- You receive currentDate in the input payload with the current IST date/time as a formatted string.\n- The backend may internally use UTC, but any date/time fields you see (currentDate, due_at, last_sent_on) are already in IST context.\n- The Sanitize Input node has already parsed the user message and resolved dates into the due_at field.\n- Use due_at exactly as provided. Do not re-parse, re-interpret, or modify dates or times.\n\nTools (and only these):\n- Append_deadline(task, due_at, chat_id, assignee?, row_key?, status?)\n- read_deadline(chat_id, row_key?, status?)\n- complete_deadline(chat_id, row_key, assignee, status=\"completed\")\n\nInput contract\n- You receive a pre-parsed payload from Sanitize with:\n  { intent, task, assignee, due_at, chat_id, row_key, status, chatInput, currentDate, reply }.\n- Prefer these fields exactly. Do not re-parse the raw user text.\n- If any tool argument you are about to send is missing, populate it from this payload. Never invent values.\n- If due_at is provided (even as an empty string), never modify it.\n- If the reply field is present, return it exactly as provided and do not call tools.\n\nTime rules\n- All user-facing times are IST.\n- The upstream node may provide:\n  - \"\" (empty string) → no due date\n  - \"YYYY-MM-DD\" → date only, no time\n  - \"YYYY-MM-DD HH:mm IST\" or an equivalent ISO string with +05:30\n- When listing:\n  - If due_at has date + time → \"DD Mon HH:mm IST\"\n  - If due_at has only a date → \"DD Mon\"\n  - If due_at is empty → \"No due date\"\n\nIntents & behavior\n\nSMALLTALK\n- If intent=\"smalltalk\", return the exact text from reply.\n- Do not call any tools.\n\nASK_DATE\n- If intent=\"ask_date\", return the exact text from reply.\n- Do not call any tools.\n\nASK_CHATID\n- If intent=\"ask_chatid\", return the exact text from reply.\n- Do not call any tools.\n\nLIST\n- Default: call read_deadline { chat_id, status: \"pending\" }.\n- If the user explicitly asks for completed/done/finished items, call read_deadline { chat_id, status: \"completed\" }.\n- Always call read_deadline before saying \"No tasks found.\"\n- Format up to 10 lines, without showing row_key or any internal IDs:\n  • {assignee}: {task} — {formatted due_at}\n- Formatting rules for {formatted due_at}:\n  - If due_at has date + time → \"DD Mon HH:mm IST\"\n  - If due_at has only a date → \"DD Mon\"\n  - If due_at is empty → \"No due date\"\n- If there are no matching tasks: reply \"No tasks found.\"\n- Do not create or modify anything in LIST.\n\nCREATE\n- If intent=\"create\" OR you have a non-empty {task} (and optionally due_at, assignee):\n  - Call Append_deadline with:\n    { task, due_at, chat_id, assignee, row_key, status: \"pending\" }.\n  - All of these should come directly from the sanitized payload.\n- Success reply (exactly this pattern):\n  Here is the task:\n  Task: {chatInput || task}\n  Assignee: {assignee || \"not set\"}\n  Due Date: {due_at || \"not set\"}\n  Status: pending\n\nCOMPLETE\n- Prefer row_key if provided and non-empty.\n  - If a row_key is present in the current payload:\n    - Call complete_deadline { chat_id, row_key, assignee, status: \"completed\" }.\n- If row_key is empty or missing but assignee is present:\n  - First call read_deadline { chat_id, status: \"pending\" }.\n  - From the returned tasks, select the most appropriate pending task for that assignee.\n    * If exactly one pending task matches that assignee, use its row_key.\n    * If multiple pending tasks match that assignee, ask one concise clarification question and stop.\n    * If no pending task matches that assignee, reply: \"No pending task found for {assignee}.\"\n  - When you have a specific row_key, call complete_deadline { chat_id, row_key, assignee, status: \"completed\" }.\n- On success, reply: \"Done ✅\".\n\nFormatting & safety\n- Never display row_key, sheet row numbers, tool names, or diagnostics to the user.\n- Keep responses brief and direct.\n- Do not echo the raw user message unless needed for clarification.\n\nMulti-user\n- Always use the provided chat_id for tool calls.\n- Never ask the user for their chat_id, user_id, or username.\n- Never echo chat_id or internal identifiers back to the user.\n\nQuality guardrails\n- Listing: never include completed items unless the user specifically asks for them.\n- Creating: do not change the meaning or wording of {task}; light trimming is fine.\n- Completing:\n  - With row_key: only update the row that matches this row_key.\n  - Without row_key: only update tasks with status=\"pending\" that match {chat_id} and the chosen assignee.\n\nFallback discipline\n- If a tool input would otherwise be empty ({}), repopulate arguments from the sanitized payload and proceed.\n- Do not skip a required tool call due to missing optional fields.",
+          "maxIterations": 6
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3,
+      "position": [
+        432,
+        0
+      ],
+      "id": "67359b23-af80-42cd-8172-deeb58ebe968",
+      "name": "AI Agent",
+      "retryOnFail": false,
+      "alwaysOutputData": false
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1H8X-_QDe7E4lTY5qKjPKeXPOPpIO6sxc_9WHwc-AZaA",
+          "mode": "list",
+          "cachedResultName": "hca",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1H8X-_QDe7E4lTY5qKjPKeXPOPpIO6sxc_9WHwc-AZaA/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1H8X-_QDe7E4lTY5qKjPKeXPOPpIO6sxc_9WHwc-AZaA/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [],
+          "schema": [],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheetsTool",
+      "typeVersion": 4.7,
+      "position": [
+        480,
+        224
+      ],
+      "id": "4e4296e1-8144-4cc8-9910-d5678929a791",
+      "name": "Append_deadline",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "RtpoEcPDjuEhdnpV",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1H8X-_QDe7E4lTY5qKjPKeXPOPpIO6sxc_9WHwc-AZaA",
+          "mode": "list",
+          "cachedResultName": "hca",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1H8X-_QDe7E4lTY5qKjPKeXPOPpIO6sxc_9WHwc-AZaA/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1H8X-_QDe7E4lTY5qKjPKeXPOPpIO6sxc_9WHwc-AZaA/edit#gid=0"
+        },
+        "filtersUI": {
+          "values": [
+            {
+              "lookupColumn": "chat_id",
+              "lookupValue": "={{ $json.chat_id || $node[\"Sanitize Input\"].json.chat_id }}\n"
+            },
+            {
+              "lookupColumn": "status",
+              "lookupValue": "={{ $json.status || $node[\"Sanitize Input\"].json.status || 'pending' }}\n"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheetsTool",
+      "typeVersion": 4.7,
+      "position": [
+        640,
+        224
+      ],
+      "id": "b3345e66-31a6-4c96-8fb1-acadf5bc04bd",
+      "name": "read_deadline",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "RtpoEcPDjuEhdnpV",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        176,
+        208
+      ],
+      "id": "32d2c62b-590e-4189-ba80-53bc9040bc91",
+      "name": "Google Gemini Chat Model",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "hAqZIRN54N0fwJXD",
+          "name": "Google Gemini(PaLM) Api account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $json.chat_id || $node[\"Sanitize Input\"].json.chat_id || \"fallback-session\" }}\n\n",
+        "contextWindowLength": 400
+      },
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        320,
+        224
+      ],
+      "id": "8da47937-6250-483b-b2c7-dbb50179cf88",
+      "name": "Simple Memory"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "documentId": {
+          "__rl": true,
+          "value": "1H8X-_QDe7E4lTY5qKjPKeXPOPpIO6sxc_9WHwc-AZaA",
+          "mode": "list",
+          "cachedResultName": "hca",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1H8X-_QDe7E4lTY5qKjPKeXPOPpIO6sxc_9WHwc-AZaA/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Sheet1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1H8X-_QDe7E4lTY5qKjPKeXPOPpIO6sxc_9WHwc-AZaA/edit#gid=0"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "={{ \"completed\" }}",
+            "assignee": "=={{ $json.assignee }}",
+            "row_key": "=={{ $json.row_key }}"
+          },
+          "matchingColumns": [
+            "row_key"
+          ],
+          "schema": [
+            {
+              "id": "intent",
+              "displayName": "intent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "task",
+              "displayName": "task",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "assignee",
+              "displayName": "assignee",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "due_at",
+              "displayName": "due_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "chat_id",
+              "displayName": "chat_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "row_key",
+              "displayName": "row_key",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "chatInput",
+              "displayName": "chatInput",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "currentDate",
+              "displayName": "currentDate",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "toolCallId",
+              "displayName": "toolCallId",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "row_number",
+              "displayName": "row_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "number",
+              "canBeUsedToMatch": true,
+              "readOnly": true,
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheetsTool",
+      "typeVersion": 4.7,
+      "position": [
+        784,
+        224
+      ],
+      "id": "915fd46f-9ea6-4ef6-ac4c-c252ecc873f6",
+      "name": "complete_deadline",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "RtpoEcPDjuEhdnpV",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// =======================\n// Sanitize Input (Code) - UPDATED\n// =======================\n\n// 1) Get current time in UTC (no double conversion)\nconst now = new Date();\n\n// Format: \"YYYY-MM-DD HH:mm IST\" (for logging / downstream)\nconst currentDateStr = now\n  .toLocaleString('en-GB', {\n    timeZone: 'Asia/Kolkata',   // display in IST only\n    year: 'numeric',\n    month: '2-digit',\n    day: '2-digit',\n    hour: '2-digit',\n    minute: '2-digit',\n    hour12: false,\n  })\n  .replace(/(\\d{2})\\/(\\d{2})\\/(\\d{4}),\\s(\\d{2}):(\\d{2})/, '$3-$2-$1 $4:$5')\n  + ' IST';\n\n// 2) Parse Telegram input\nconst input = $input.all()[0].json;\nconst text = (input.message?.text || '').trim();\nconst chat_id = String(input.message?.chat?.id || '');\n\nif (!text || !chat_id) {\n  return [{\n    json: {\n      intent: 'error',\n      chatInput: text,\n      chat_id,\n      reply: 'Unable to process message.',\n      currentDate: currentDateStr,\n    },\n  }];\n}\n\nconst lowerText = text.toLowerCase();\n\n// -----------------------------\n// INTENT DETECTION\n// -----------------------------\n\nlet intent = 'create';\nlet reply = null;\n\n// -- Smalltalk detection --\nconst smalltalkPatterns = [\n  /^(hi|hello|hey|sup|yo|greetings|good morning|good afternoon|good evening)\\b/i,\n  /^(thanks|thank you|thx|ty)\\b/i,\n  /^(bye|goodbye|see you|cya)\\b/i,\n  /^(how are you|what's up|wassup)\\b/i,\n  /^(ok|okay|cool|nice|great|awesome)$/i,\n];\n\nif (smalltalkPatterns.some((p) => p.test(text))) {\n  intent = 'smalltalk';\n\n  if (/^(hi|hello|hey|sup|yo|greetings|good morning|good afternoon|good evening)\\b/i.test(text)) {\n    reply = 'Hello! How can I help you with your tasks today?';\n  } else if (/^(thanks|thank you|thx|ty)\\b/i.test(text)) {\n    reply = \"You're welcome! 😊\";\n  } else if (/^(bye|goodbye|see you|cya)\\b/i.test(text)) {\n    reply = 'Goodbye! Have a great day!';\n  } else if (/^(how are you|what's up|wassup)\\b/i.test(text)) {\n    reply = \"I'm doing great! Ready to help you manage your tasks.\";\n  } else {\n    reply = 'Got it! 👍';\n  }\n\n  return [{\n    json: {\n      intent,\n      chatInput: text,\n      chat_id,\n      reply,\n      currentDate: currentDateStr,\n    },\n  }];\n}\n\n// -- Ask date detection --\nif (\n  /\\b(what|whats|what's)\\s+(is\\s+)?(the\\s+)?(date|day|today)\\b/i.test(text) ||\n  /\\b(today|current date|todays date)\\?*$/i.test(text)\n) {\n  intent = 'ask_date';\n\n  const dayName = now.toLocaleDateString('en-US', {\n    weekday: 'long',\n    timeZone: 'Asia/Kolkata',\n  });\n  const day = now.toLocaleDateString('en-US', {\n    day: 'numeric',\n    timeZone: 'Asia/Kolkata',\n  });\n  const month = now.toLocaleDateString('en-US', {\n    month: 'long',\n    timeZone: 'Asia/Kolkata',\n  });\n  const year = now.toLocaleDateString('en-US', {\n    year: 'numeric',\n    timeZone: 'Asia/Kolkata',\n  });\n\n  reply = `Today is ${dayName} ${day} ${month} ${year} IST`;\n\n  return [{\n    json: {\n      intent,\n      chatInput: text,\n      chat_id,\n      reply,\n      currentDate: currentDateStr,\n    },\n  }];\n}\n\n// -- Ask chat_id detection --\nif (\n  /\\b(what|whats|what's)\\s+(is\\s+)?(my\\s+)?(chat\\s*id|chatid|id)\\b/i.test(text)\n) {\n  intent = 'ask_chatid';\n  reply = `Your chat ID is: ${chat_id}`;\n  return [{\n    json: {\n      intent,\n      chatInput: text,\n      chat_id,\n      reply,\n      currentDate: currentDateStr,\n    },\n  }];\n}\n\n// -- List detection --\nif (\n  // e.g. \"list my tasks\", \"show my tasks\"\n  /\\b(list|show|display|view|get|see)\\b.*\\b(task|tasks|deadline|deadlines|todo|todos)\\b/i.test(text) ||\n\n  // e.g. \"my tasks\", \"all tasks\"\n  /\\b(my|all)\\s+(task|tasks|deadline|deadlines|todo|todos)\\b/i.test(text) ||\n\n  // e.g. just \"tasks?\"\n  /^(tasks|deadlines|todos)\\?*$/i.test(text) ||\n\n  // e.g. \"what are the task for vashu\"\n  /\\bwhat\\s+are\\s+the\\s+(task|tasks)\\b/i.test(text) ||\n\n  // e.g. \"tasks for vashu\", \"task for neha\"\n  /\\b(task|tasks)\\s+for\\s+[a-z]+\\b/i.test(text)\n) {\n  intent = 'list';\n  return [{\n    json: {\n      intent,\n      chatInput: text,\n      chat_id,\n      status: /\\b(completed|done|finished)\\b/i.test(text) ? 'completed' : 'pending',\n      currentDate: currentDateStr,\n    },\n  }];\n}\n\n// -- Complete detection --\nif (\n  /^(complete|completed|done|finish|finished|mark\\s+as\\s+done)\\b/i.test(text) ||\n  /\\b(complete|completed|done|finish|finished)\\s+(task|tasks)\\b/i.test(text) ||\n  /\\bmark\\s+(the\\s+)?(task|tasks)\\s+(as\\s+)?(complete|completed|done|finished)\\b/i.test(text)\n) {\n  intent = 'complete';\n\n  let taskText = text;\n\n  // Extract assignee (for/by/of name OR @name)\n  let assignee = '';\n  const assigneeMatch =\n    text.match(/\\b(for|by|of)\\s+([a-z]+)\\b/i) ||\n    text.match(/@([a-z]+)/i);\n\n  if (assigneeMatch) {\n    assignee = assigneeMatch[2] || assigneeMatch[1];\n    taskText = taskText.replace(assigneeMatch[0], '').trim();\n  }\n\n  // Remove complete keywords from task text\n  taskText = taskText.replace(\n    /^(complete|completed|done|finish|finished|mark\\s+as\\s+done)\\b/i,\n    ''\n  ).trim();\n  taskText = taskText.replace(\n    /\\b(complete|completed|done|finish|finished)\\s+(task|tasks)\\b/i,\n    ''\n  ).trim();\n  taskText = taskText.replace(/\\s+/g, ' ').trim();\n\n  const row_key = '';\n\n  return [{\n    json: {\n      intent,\n      chatInput: text,\n      chat_id,\n      assignee,\n      task: taskText,\n      status: 'pending',\n      row_key,\n      currentDate: currentDateStr,\n    },\n  }];\n}\n\n// -----------------------------\n// CREATE TASK INTENT\n// -----------------------------\n\nlet task = text;\nlet assignee = '';\nlet due_at = '';\n\n// Extract assignee (for|to|assign to name OR @name)\nconst assigneePatterns = [\n  /\\b(for|to|assign\\s+to)\\s+([a-z]+)\\b/i,\n  /@([a-z]+)/i,\n];\n\nfor (const pattern of assigneePatterns) {\n  const match = text.match(pattern);\n  if (match) {\n    assignee = match[2] || match[1];\n    task = task.replace(match[0], '').trim();\n    break;\n  }\n}\n\n// ---- Date parsing helper ----\nfunction parseDateToken(dateStr, referenceDate) {\n  const lower = dateStr.toLowerCase().trim();\n  const ref = referenceDate; // now (UTC-based, but okay for relative calc)\n\n  // Today\n  if (lower === 'today') {\n    return {\n      year: ref.getFullYear(),\n      month: ref.getMonth(),\n      day: ref.getDate(),\n    };\n  }\n\n  // Tomorrow\n  if (lower === 'tomorrow') {\n    const d = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate());\n    d.setDate(d.getDate() + 1);\n    return {\n      year: d.getFullYear(),\n      month: d.getMonth(),\n      day: d.getDate(),\n    };\n  }\n\n  // Weekday names\n  const weekdays = [\n    'sunday', 'monday', 'tuesday', 'wednesday',\n    'thursday', 'friday', 'saturday',\n  ];\n  const targetDay = weekdays.indexOf(lower);\n  if (targetDay !== -1) {\n    const currentDay = ref.getDay();\n    let daysToAdd = targetDay - currentDay;\n    if (daysToAdd <= 0) daysToAdd += 7;\n    const d = new Date(ref.getFullYear(), ref.getMonth(), ref.getDate());\n    d.setDate(d.getDate() + daysToAdd);\n    return {\n      year: d.getFullYear(),\n      month: d.getMonth(),\n      day: d.getDate(),\n    };\n  }\n\n  // Absolute dates:\n  // \"14 nov 2025\", \"nov 14 2025\", \"2025-11-14\"\n  const datePatterns = [\n    /^(\\d{1,2})\\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\s+(\\d{4})$/i,\n    /^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\s+(\\d{1,2})\\s+(\\d{4})$/i,\n    /^(\\d{4})-(\\d{2})-(\\d{2})$/,\n  ];\n\n  const months = {\n    jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,\n    jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11,\n  };\n\n  for (const pattern of datePatterns) {\n    const match = lower.match(pattern);\n    if (match) {\n      let year, month, day;\n      if (pattern.source.includes('jan|feb')) {\n        if (match[1].length <= 2) {\n          // \"14 nov 2025\"\n          day = parseInt(match[1], 10);\n          month = months[match[2].substring(0, 3)];\n          year = parseInt(match[3], 10);\n        } else {\n          // \"nov 14 2025\"\n          month = months[match[1].substring(0, 3)];\n          day = parseInt(match[2], 10);\n          year = parseInt(match[3], 10);\n        }\n      } else {\n        // \"2025-11-14\"\n        year = parseInt(match[1], 10);\n        month = parseInt(match[2], 10) - 1;\n        day = parseInt(match[3], 10);\n      }\n      return { year, month, day };\n    }\n  }\n\n  return null;\n}\n\n// ---- Extract date token & time token from the text ----\n\n// 1) Try to find date words in the text\nconst datePatternsForText = [\n  /\\b(today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\\b/i,\n  /\\b(\\d{1,2})\\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\s+(\\d{4})\\b/i,\n  /\\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\\s+(\\d{1,2})\\s+(\\d{4})\\b/i,\n  /\\b(\\d{4})-(\\d{2})-(\\d{2})\\b/,\n];\n\nlet dateToken = null;\nfor (const pattern of datePatternsForText) {\n  const match = text.match(pattern);\n  if (match) {\n    dateToken = match[0];\n    task = task.replace(match[0], '').trim();\n    break;\n  }\n}\n\n// 2) Extract time (e.g. \"12PM\", \"3 pm\", \"14:30\", \"9:15am\")\nlet hour = null;\nlet minute = null;\n\n// First try 12-hour with am/pm (with or without colon)\nlet timeMatch =\n  text.match(/\\b(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)\\b/i);\n\nif (!timeMatch) {\n  // Then try 24-hour \"HH:MM\"\n  timeMatch = text.match(/\\b(\\d{1,2}):(\\d{2})\\b/);\n}\n\nif (timeMatch) {\n  hour = parseInt(timeMatch[1], 10);\n  minute = parseInt(timeMatch[2] || '0', 10);\n\n  const ampm = (timeMatch[3] || '').toLowerCase();\n  if (ampm === 'pm' && hour < 12) {\n    hour += 12;\n  } else if (ampm === 'am' && hour === 12) {\n    hour = 0;\n  }\n\n  task = task.replace(timeMatch[0], '').trim();\n}\n\n// 3) Build due_at\nlet dateInfo = null;\nif (dateToken) {\n  dateInfo = parseDateToken(dateToken, now);\n} else if (hour !== null) {\n  // time only → treat as today\n  dateInfo = {\n    year: now.getFullYear(),\n    month: now.getMonth(),\n    day: now.getDate(),\n  };\n}\n\nif (dateInfo) {\n  const year = dateInfo.year;\n  const monthStr = String(dateInfo.month + 1).padStart(2, '0');\n  const dayStr = String(dateInfo.day).padStart(2, '0');\n\n  if (hour !== null && minute !== null) {\n    const hourStr = String(hour).padStart(2, '0');\n    const minStr = String(minute).padStart(2, '0');\n    due_at = `${year}-${monthStr}-${dayStr} ${hourStr}:${minStr} IST`;\n  } else {\n    // Only date, no time\n    due_at = `${year}-${monthStr}-${dayStr}`;\n  }\n}\n\n// Clean up task text\ntask = task\n  .replace(/\\s+/g, ' ')\n  .replace(/^(by|on|at|for|to)\\s+/i, '')\n  .trim();\n\n// Unique row_key based on chat + timestamp\nconst row_key = `${chat_id}-${now.getTime()}`;\n\nreturn [{\n  json: {\n    intent: 'create',\n    task,\n    assignee,\n    due_at,\n    chat_id,\n    row_key,\n    status: 'pending',\n    chatInput: text,\n    currentDate: currentDateStr,\n  },\n}];\n"
+      },
+      "id": "95790e65-e4aa-4565-8a49-a26cf9152f5f",
+      "name": "Sanitize Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        16,
+        0
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read All Tasks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read All Tasks": {
+      "main": [
+        [
+          {
+            "node": "Filter Deadlines",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Deadlines": {
+      "main": [
+        [
+          {
+            "node": "IF Has Reminders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Has Reminders": {
+      "main": [
+        [
+          {
+            "node": "Send Reminder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Sanitize Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Telegram Send",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Append_deadline": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "read_deadline": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "complete_deadline": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sanitize Input": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "7d667195-8650-431c-96f6-643874db6a3e",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "e22e1c09f1fbb621edbd1877c1fc7f694d876b2569c9b2ae6a1fbd4a057a356d"
+  },
+  "id": "WbuAnXBwjS3f0KMu",
+  "tags": []
+}
